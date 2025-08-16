@@ -1,16 +1,19 @@
-"""Kavenegar REST API – Organized Single-File Python Client
+"""Kavenegar REST API – Professional Single-File Python Client
 
-This module provides a tidy, typed, and documented wrapper around Kavenegar's
-REST endpoints (SMS, Verify, Call, Account) plus a few convenience utilities.
+This module is a production-ready, single-file client for the Kavenegar REST API
+(https://kavenegar.com/rest.html). It is organized, typed, documented, and
+includes pragmatic conveniences such as connection reuse, uniform error
+handling, safe API-key masking, and parameter normalization for list/tuple/dict
+values that Kavenegar expects as JSON-encoded strings in form data.
 
-- Connection reuse via requests.Session
-- Uniform error handling (APIException / HTTPException)
-- Safe API-key masking in errors and repr/str
-- Params normalization for array-like values (Kavenegar quirk)
-- Helper utilities for bulk send, timeouts, proxies, and simple health checks
+Main areas:
+- SMS      : send, status, inbox/outbox queries, cancel, counts, etc.
+- Verify   : template lookups (OTP), convenience builders.
+- Call     : TTS calls, status, outbound/inbound, playback.
+- Account  : info, config, (optional) usage & transactions.
+- Utils    : bulk helpers, webhook parsing, health check, API key rotation.
 
-Note: Some helper endpoints are convenience wrappers around common patterns.
-Adjust or remove endpoints that your account/plan does not support.
+Keep or remove optional endpoints based on your account plan.
 """
 from __future__ import annotations
 
@@ -29,7 +32,8 @@ except ImportError:  # pragma: no cover
 # =============================
 DEFAULT_TIMEOUT: int = 10
 
-JsonLike = Union[str, int, float, bool, None, Mapping[str, Any], Sequence[Any]]
+JsonScalar = Union[str, int, float, bool, None]
+JsonLike = Union[JsonScalar, Mapping[str, Any], Sequence[Any]]
 Params = MutableMapping[str, Union[str, int, float, bool]]
 
 
@@ -37,16 +41,17 @@ Params = MutableMapping[str, Union[str, int, float, bool]]
 # Exceptions
 # =============================
 class APIException(Exception):
-    """Raised when the Kavenegar API returns a non-200 status."""
+    """Raised when the Kavenegar API returns a non-200 status code."""
 
-    def __init__(self, status: Union[int, str], message: str) -> None:
+    def __init__(self, status: Union[int, str], message: str, *, payload: Optional[Mapping[str, Any]] = None) -> None:
         super().__init__(f"APIException[{status}] {message}")
         self.status = status
         self.message = message
+        self.payload = payload or {}
 
 
 class HTTPException(Exception):
-    """Raised when an HTTP/network/parsing error occurs before API handling."""
+    """Raised for HTTP/network/parsing errors before API handling."""
 
 
 # =============================
@@ -76,7 +81,7 @@ class KavenegarAPI:
         session: Optional[requests.Session] = None,
     ) -> None:
         self.apikey: str = apikey
-        self.apikey_mask: str = f"{apikey[:2]}********{apikey[-2:]}" if len(apikey) >= 4 else "********"
+        self.apikey_mask: str = self._mask(apikey)
         self.timeout: int = timeout or DEFAULT_TIMEOUT
         self.proxies: Optional[Mapping[str, str]] = proxies
         self._session: requests.Session = session or requests.Session()
@@ -89,15 +94,16 @@ class KavenegarAPI:
         return f"kavenegar.KavenegarAPI({self.apikey_mask})"
 
     # -------- Private helpers --------
+    @staticmethod
+    def _mask(key: str) -> str:
+        return f"{key[:2]}********{key[-2:]}" if len(key) >= 4 else "********"
+
     def _build_url(self, action: str, method: str) -> str:
         return f"https://{self.host}/{self.version}/{self.apikey}/{action}/{method}.json"
 
     @staticmethod
     def _jsonify_params(params: Mapping[str, Any]) -> Params:
-        """Convert list/tuple/dict params to JSON strings (Kavenegar quirk).
-
-        Example: {"sender": ["3000", "3001"]} -> {"sender": "[\"3000\",\"3001\"]"}
-        """
+        """Convert list/tuple/dict params to JSON strings (Kavenegar quirk)."""
         out: Dict[str, Union[str, int, float, bool]] = {}
         for key, value in params.items():
             if isinstance(value, (dict, list, tuple)):
@@ -123,15 +129,13 @@ class KavenegarAPI:
             except Exception as e:  # JSON decode or Unicode error
                 raise HTTPException(str(e))
 
-            # Expected envelope: {"return": {"status": 200, "message": ""}, "entries": [...]}
             meta = payload.get("return", {})
             status = meta.get("status")
             message = meta.get("message", "")
             if status == 200:
                 return payload.get("entries")
-            raise APIException(status, message)
+            raise APIException(status, message, payload=payload)
         except requests.exceptions.RequestException as e:
-            # redact API key
             redacted = str(e).replace(self.apikey, self.apikey_mask)
             raise HTTPException(redacted)
 
@@ -147,7 +151,7 @@ class KavenegarAPI:
 
     def rotate_api_key(self, new_key: str) -> None:
         self.apikey = new_key
-        self.apikey_mask = f"{new_key[:2]}********{new_key[-2:]}" if len(new_key) >= 4 else "********"
+        self.apikey_mask = self._mask(new_key)
 
     # -------- SMS APIs --------
     def sms_send(self, params: Optional[Mapping[str, Any]] = None) -> Any:
@@ -195,7 +199,7 @@ class KavenegarAPI:
     def sms_archive(self, params: Optional[Mapping[str, Any]] = None) -> Any:
         return self._post("sms", "archive", params)
 
-    # Optional/extended (may vary by plan)
+    # Optional/extended (plan dependent)
     def sms_blacklist(self, params: Optional[Mapping[str, Any]] = None) -> Any:
         return self._post("sms", "blacklist", params)
 
@@ -229,7 +233,7 @@ class KavenegarAPI:
         params.update(tokens)
         return self.verify_lookup(params)
 
-    # Optional/extended (may vary by plan)
+    # Optional/extended (plan dependent)
     def verify_voicecall(self, receptor: str, token: str, template: str) -> Any:
         return self._post("verify", "voicecall", {"receptor": receptor, "token": token, "template": template})
 
@@ -255,7 +259,7 @@ class KavenegarAPI:
     def call_play(self, params: Optional[Mapping[str, Any]] = None) -> Any:
         return self._post("call", "play", params)
 
-    # Optional/extended (may vary by plan)
+    # Optional/extended (plan dependent)
     def call_transfer(self, params: Optional[Mapping[str, Any]] = None) -> Any:
         return self._post("call", "transfer", params)
 
@@ -275,7 +279,7 @@ class KavenegarAPI:
             return info[0].get("remaincredit")
         return None
 
-    # Optional/extended (may vary by plan)
+    # Optional/extended (plan dependent)
     def account_usage(self, params: Optional[Mapping[str, Any]] = None) -> Any:
         return self._post("account", "usage", params)
 
@@ -289,13 +293,6 @@ class KavenegarAPI:
         return self._post("account", "blocked", params)
 
     # -------- Utilities / Helpers --------
-    def ping(self) -> Any:
-        """Basic connectivity check using account_info()."""
-        try:
-            return self.account_info()
-        except Exception as e:  # pragma: no cover
-            return {"status": "error", "message": str(e)}
-
     @staticmethod
     def _chunk(seq: Sequence[str], size: int) -> List[List[str]]:
         return [list(seq[i : i + size]) for i in range(0, len(seq), size)]
